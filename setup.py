@@ -2,7 +2,7 @@ from setuptools import find_packages, setup
 
 setup(
     name="bulky",
-    version="0.0.1.b",
+    version="0.0.1.b0",
     description="Utilites for bulk operations using SQLAlchemy and PostgreSQL",
     author="Alexander Sidorov",
     author_email="alex.n.sidorov@gmail.com",
