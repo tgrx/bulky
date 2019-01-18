@@ -1,7 +1,14 @@
 image: python:latest
 
+services:
+  - postgres:latest
+
 variables:
   PIP_CACHE_DIR: "$CI_PROJECT_DIR/.cache/pip"
+  POSTGRES_DB: test
+  POSTGRES_USER: test
+  POSTGRES_PASSWORD: "test"
+  DATABASE_URL: "postgresql://test:test@postgres:5432/test"
 
 cache:
   paths:
@@ -13,12 +20,11 @@ before_script:
   - pip install virtualenv
   - virtualenv venv
   - source venv/bin/activate
+  - pip install --upgrade --requirement requirements.txt
 
 test:
   script:
   - python setup.py test
-  - pip install tox flake8  # you can also use tox
-  - tox -e py37,flake8
 
 run:
   script:
