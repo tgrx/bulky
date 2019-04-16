@@ -1,0 +1,7 @@
+[development]
+
+database_url = "postgresql://alex:alex@localhost:5432/bulky"
+
+[testing_gitlab_ci]
+
+database_url = "postgresql://test:test@postgres:5432/test"

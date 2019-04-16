@@ -9,15 +9,15 @@ addons:
   postgresql: "9.6"
 
 env:
-  - PIP_DOWNLOAD_CACHE=$HOME/.pip_download_cache
   - DATABASE_URL="postgresql://postgres@localhost:5432/travis_ci_test"
 
 install:
   - easy_install -U pip
-  - pip install --upgrade --requirement requirements.txt
+  - pip install pipenv
+  - pipenv install --dev
 
 before_script:
   - psql -c 'create database travis_ci_test;' -U postgres
 
 script:
-  - python -m unittest
+  - ./qa.sh
