@@ -27,7 +27,7 @@ setup(
     install_requires=(
         "SQLAlchemy>=1.1",
         "psycopg2-binary>=2.7",
-        "jinja2>=2",
+        "Jinja2>=2.10.1",
         "typeguard>=2",
     ),
     python_requires=">=3.6, <4",
