@@ -1,177 +1,228 @@
 import json
 from decimal import Decimal
-from typing import Dict, Sequence, Union, Any
+from typing import Dict, List, Optional, Text
 
 import sqlalchemy as sa
-from psycopg2._psycopg import QuotedString, adapt
+from jinja2 import Template
+from psycopg2.extensions import QuotedString, adapt
 from sqlalchemy import Table
 from sqlalchemy.ext.declarative import DeclarativeMeta
 from sqlalchemy.orm import Mapper, Session
 from sqlalchemy.orm.attributes import InstrumentedAttribute
+from typeguard import check_type, typechecked
 
 from bulky import consts
 from bulky import errors
+from bulky.internals import sql
+from bulky.types import (
+    CleanReturningType,
+    CleanedValuesSeriesType,
+    ColumnPropertyType,
+    ColumnType,
+    ColumnTypesMapType,
+    ReturningType,
+    TableColumnsSetType,
+    TableType,
+    ValuesSeriesType,
+    ValuesType,
+)
 
-_column_type_cache = {}
+_column_type_cache: Dict[Text, ColumnTypesMapType] = {}
 
 
-def is_type_comparable(type_name: str) -> bool:
+@typechecked(always=True)
+def get_table(table_or_model: TableType) -> Table:
     """
-    Checks if given DB type is comparable in a trivial way
+    Returns Table class for given Table Type
+
+    :param table_or_model: SqlAlchemy table or mapper or model
+    :return: SqlAlchemy Table class
     """
 
-    if not isinstance(type_name, str):
+    if isinstance(table_or_model, Table):
+        table = table_or_model
+    else:
+        table = table_or_model.__table__  # TODO: use sqlalchemy inspect
+
+    return table
+
+
+@typechecked(always=True)
+def get_table_name(table_or_model: TableType) -> Text:
+    """
+    Returns table name in database for given Table or Model
+
+    :param table_or_model: SqlAlchemy table or mapper or model
+    :return: table name in database
+    """
+
+    inspected = sa.inspect(table_or_model)
+
+    if isinstance(inspected, Table):
+        table_name: Text = inspected.name
+    elif isinstance(inspected, Mapper):
+        table_name = inspected.tables[0].name
+    else:  # pragma: no cover
+        raise ValueError(f"unable to get table name for {table_or_model}")
+
+    return table_name
+
+
+@typechecked(always=True)
+def is_db_type_comparable(db_type: Text) -> bool:
+    """
+    Checks if given database type is comparable in a trivial way.
+
+    :param db_type: database name of column type
+    :return: is type comparable via trivial equality test ("="), or not
+    """
+
+    if db_type.endswith("[]"):
         return False
 
-    if type_name.endswith("[]"):
-        return False
-
-    if type_name in consts.NON_COMPARABLE_TYPES:
+    if db_type in consts.NON_COMPARABLE_DB_TYPES:
         return False
 
     return True
 
 
-def clean_values(
-    table: Union[Table, Mapper],
-    values_list: Sequence[dict],
-    cast_db_types: bool = False,
-    column_types: Dict[str, str] = None,
-) -> Sequence[Dict[str, Any]]:
-    """
-    Cleans up and validates keys and values in values_list
+def clean_returning(
+    table_or_model: TableType, returning: Optional[ReturningType]
+) -> CleanReturningType:
+    if not returning:
+        return []
 
-    :param table: SqlAlchemy table or mapper
-    :param values_list: sequence of dicts with values
-    :param cast_db_types: determines if need to cast values to db types
-    :param column_types: column types map
-    :return: sequence of cleaned values (column: value dicts)
-    """
+    columns = get_table_columns(table_or_model)
+    cleaned = [
+        sa.text(k)
+        for k in sorted(
+            {
+                get_column_key(table_or_model, key, None, columns)
+                for key_index, key in enumerate(returning)
+            }
+        )
+    ]
+    return cleaned
 
-    if not isinstance(values_list, consts.ALLOWED_VALUES_TYPES):
-        raise errors.BulkOperationError(
-            "Invalid values type {vt}, expected: {allowed}".format(
-                vt=type(values_list), allowed=consts.ALLOWED_VALUES_TYPES
-            )
+
+def validate_values(values: ValuesType, values_index: int):
+    try:
+        check_type("values", values, ValuesType)
+    except TypeError:  # pragma: no cover
+        raise errors.InvalidValueError(
+            values_index, f"invalid type, expect: {ValuesType}"
         )
 
-    result = []
+    if not values.keys():
+        raise errors.InvalidValueError(values_index, "empty values")
 
-    keys_general = None  # general, common keys used in values_list
-    columns = get_table_columns(table)
+
+@typechecked(always=True)
+def clean_values(
+    table_or_model: TableType,
+    values_series: ValuesSeriesType,
+    cast_db_types: bool = False,
+    column_types: Optional[ColumnTypesMapType] = None,
+) -> CleanedValuesSeriesType:
+    """
+    Cleans up and validates keys and values in values_series.
+
+    :param table_or_model: SqlAlchemy table or mapper or model
+    :param values_series: sequence of dicts with values
+    :param cast_db_types: determines if need to cast values to db types
+    :param column_types: column types map
+    :return: sequence of cleaned values ({column name: value} dicts)
+    """
+
+    result: List = []
+
+    if not values_series:
+        return result
+
+    # common columns used in values_list
+    # expected to be the same in each values set
+    columns_common = None
+
+    columns_table = get_table_columns(table_or_model)
 
     # map: (column name | attr) -> column name
-    aliased_keys = {column: column for column in columns}
-
-    # remap values: change key alias to actual key for each values
+    columns_cleaned = {column: column for column in columns_table}
 
     column_types = column_types or {}
 
-    for idx, values in enumerate(values_list):
-        if not isinstance(values, dict):
-            raise errors.InvalidValueError(idx, "not a dict")
+    # remap values: change dirty key to actual key for each values
 
-        if not tuple(values.keys()):  # FIXME: iterate / any!!!
-            raise errors.InvalidValueError(idx, "empty values")
+    for values_index, values in enumerate(values_series):
+        validate_values(values, values_index)
 
-        keys_current = set()
+        columns_current = set()
 
-        cleaned_values = {}
+        values_cleaned = {}
 
         # remap each key in values, keeping resulting key for alias
 
-        for key_alias, value in values.items():
-            key = aliased_keys.get(key_alias)
+        for column_dirty, value in values.items():
+            column_cleaned = columns_cleaned.get(column_dirty)
 
-            if not key:
-                key = get_column_key(table, key_alias, idx, columns)
-                aliased_keys[key_alias] = key
+            if not column_cleaned:
+                column_cleaned = get_column_key(
+                    table_or_model, column_dirty, values_index, columns_table
+                )
+                columns_cleaned[column_cleaned] = column_cleaned
 
             if not cast_db_types:
-                cleaned_values[key] = value
+                value_cleaned = value
             else:
-                cleaned_values[key] = to_db_literal(
-                    value, cast_to=column_types.get(key)
+                value_cleaned = to_db_literal(
+                    value, cast_to=column_types.get(column_cleaned)
                 )
 
-            keys_current.add(key)
+            values_cleaned[column_cleaned] = value_cleaned
+
+            columns_current.add(column_cleaned)
 
         # check that each values have the same set of keys
 
-        keys_general = keys_general or frozenset(keys_current)
+        columns_common = columns_common or frozenset(columns_current)
 
-        keys_added = keys_current - keys_general
-        keys_missed = keys_general - keys_current
+        columns_excess = columns_current - columns_common
+        columns_missing = columns_common - columns_current
 
-        if any((keys_added, keys_missed)):
-            msg = "keys mismatch: added={added}, missed={missed}".format(
-                added=sorted(keys_added), missed=sorted(keys_missed)
+        if any((columns_excess, columns_missing)):
+            raise errors.InvalidValueError(
+                values_index,
+                f"keys mismatch: excess={sorted(columns_excess)}, missing={sorted(columns_missing)}",
             )
-            raise errors.InvalidValueError(idx, msg)
 
         # add remapped values to result
 
-        result.append(cleaned_values)
+        result.append(values_cleaned)
 
     return result
 
 
-def get_column_types(session: Session, table: Union[Table, Mapper]) -> Dict[str, str]:
+@typechecked(always=True)
+def get_column_types(session: Session, table_or_model: TableType) -> ColumnTypesMapType:
     """
-    Returns PostgreSQL column types for columns of given table
+    Returns PostgreSQL types for columns of given table.
+
+    :param session: SqlAlchemy session
+    :param table_or_model: SqlAlchemy table or mapper or model
+    :return: mapping between column name and db type name
     """
 
-    inspected = sa.inspect(table)
-    if isinstance(inspected, Table):
-        tablename = inspected.name
-    elif isinstance(inspected, Mapper):
-        tablename = inspected.tables[0].name
-    else:
-        raise TypeError("Invalid table {}".format(table))
+    table_name = get_table_name(table_or_model)
 
-    if tablename in _column_type_cache:
-        return _column_type_cache[tablename]
+    if table_name in _column_type_cache:
+        return _column_type_cache[table_name]
 
-    stmt = """
-    SELECT
-    c.column_name,
-    (
-        CASE c.data_type
-        WHEN 'ARRAY'
-            THEN e.data_type || '[]'
-        WHEN 'USER-DEFINED'
-            THEN c.udt_name
-        ELSE c.data_type
-        END
-    ) AS column_type
-    FROM information_schema.columns c
-        LEFT JOIN information_schema.element_types e
-            ON (
-                (
-                    c.table_catalog,
-                    c.table_schema,
-                    c.table_name,
-                    'TABLE',
-                    c.dtd_identifier
-                ) = (
-                    e.object_catalog,
-                    e.object_schema,
-                    e.object_name,
-                    e.object_type,
-                    e.collection_type_identifier
-                )
-            )
-    WHERE c.table_schema = 'public' AND c.table_name = '{table}'
-    ORDER BY c.ordinal_position
-    ;
-    """.format(
-        table=tablename
-    )
+    stmt = Template(sql.STMT_GET_COLUMN_TYPES).render(table_name=table_name)
 
-    response = session.execute(stmt).fetchall()
+    response = session.execute(sa.text(stmt)).fetchall()
 
     result = {row.column_name: row.column_type for row in response}
-    _column_type_cache[tablename] = result
+    _column_type_cache[table_name] = result
+
     return result
 
 
@@ -181,19 +232,19 @@ def to_db_literal(value, cast_to=None):
     elif isinstance(value, str):
         value = QuotedString(value.encode("utf-8")).getquoted().decode("utf-8")
         return value
-    elif isinstance(value, (int, float)):
-        return value
     elif isinstance(value, bool):
-        value = QuotedString(str(value).lower()).getquoted().decode("utf-8")
+        value = int(value)
+        return value
+    elif isinstance(value, (int, float)):
         return value
     elif isinstance(value, (dict, list)):
         if cast_to == "json" or cast_to == "jsonb":
             value = json.dumps(value)
             return QuotedString(value).getquoted().decode("utf-8")
         elif cast_to == "hstore":
-            assert isinstance(value, dict)
+            assert isinstance(value, dict)  # TODO: discover if `assert` is enough
             s = ",".join(
-                '"{}"=>{}'.format(k, "NULL" if not v else '"{}"'.format(v))
+                '"{}"=>{}'.format(k, "NULL" if v is None else '"{}"'.format(v))
                 for k, v in value.items()
             )
             return QuotedString(s).getquoted().decode("utf-8")
@@ -205,44 +256,52 @@ def to_db_literal(value, cast_to=None):
         return QuotedString(str(value)).getquoted().decode("utf-8")
 
 
-def get_table_columns(table: Union[Table, Mapper]) -> frozenset:
+@typechecked(always=True)
+def get_table_columns(table_or_model: TableType) -> TableColumnsSetType:
     """
     Returns a set of all keys of model/table fields/columns
+
+    :param table_or_model: SqlAlchemy table or mapper or model
+    :return: set of column names (keys)
     """
 
-    if not isinstance(table, consts.ALLOWED_TABLE_TYPES):
-        raise TypeError("Invalid table {}".format(table))
-
-    inspected = sa.inspect(table)
+    inspected = sa.inspect(table_or_model)
     columns = frozenset(inspected.columns.keys())
 
     return columns
 
 
+@typechecked(always=True)
 def get_column_key(
-    table: Union[Table, Mapper],
-    column: consts.ALLOWED_COLUMN_TYPES,
-    value_index: int = None,
-    columns: frozenset = None,
-) -> str:
-    columns = columns or get_table_columns(table)
+    table_or_model: TableType,
+    column: ColumnType,
+    value_index: Optional[int] = None,
+    columns: Optional[TableColumnsSetType] = None,
+) -> Text:
+    """
+    Resolves and returns a column key (name), with validations.
 
-    if not isinstance(column, consts.ALLOWED_COLUMN_TYPES):
-        raise errors.InvalidColumnError(column, "Unsupported column type", value_index)
+    :param table_or_model: SqlAlchemy table or mapper or model
+    :param column: a column which expected to belong to table
+    :param value_index: index of values in values_series for which column key is resolved
+    :param columns: set of column names. Will be resolved if empty.
+    :return: validated name of the column
+    """
 
-    if isinstance(column, str):
+    columns = columns or get_table_columns(table_or_model)
+
+    if isinstance(column, Text):
         if column not in columns:
-            raise errors.InvalidColumnError(column, "Not in model", value_index)
+            raise errors.InvalidColumnError(column, "not in table", value_index)
 
         # XXX: we need table attribute to check then if it is scalar
 
-        if isinstance(table, DeclarativeMeta):
-            column = getattr(table, column)
+        if isinstance(table_or_model, DeclarativeMeta):
+            column = getattr(table_or_model, column)
         else:
-            column = table.columns[column]
+            column = table_or_model.columns[column]
 
     if isinstance(column, InstrumentedAttribute):
-        if not isinstance(column.property, consts.ALLOWED_COLUMN_PROPS):
-            raise errors.InvalidColumnError(column, "Not a column attribute")
+        check_type("column.property", column.property, ColumnPropertyType)
 
-    return column.key
+    return str(column.key)

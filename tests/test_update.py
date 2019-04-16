@@ -1,10 +1,10 @@
 from datetime import datetime
 from decimal import Decimal
-from typing import Union
 
 from jinja2 import Template
 
 from bulky import update
+from bulky.types import ReferenceType
 from .db import *
 
 
@@ -40,7 +40,7 @@ class UpdateTest(BulkyTest):
             Model.v_date: datetime.now().date(),
             Model.v_datetime: datetime.now(),
             Model.v_float: 3.14,
-            Model.v_int: 1488,
+            Model.v_int: 31337,
             Model.v_numeric: Decimal(0.1),
             Model.v_text: "xyz",
         }
@@ -68,8 +68,17 @@ class UpdateTest(BulkyTest):
         self.assertEqual(":zzz%", r.v_text, "string field mismatch")
         self.assertEqual(None, r.v_date, "date field mismatch")
 
+    def test_diff_update(self):
+        dataset = {Model.id: self.obj.id, Model.v_int: 1}
+
+        r = update(self.session, Model, [dataset], returning=[Model.id])
+        self.assertEqual(len(r), 1)
+
+        r = update(self.session, Model, [dataset], returning=[Model.id])
+        self.assertEqual(len(r), 0, "update of the same value")
+
     def update_and_validate(
-        self, dataset, returning=None, references: Union[str, list] = "id"
+        self, dataset, returning=None, references: ReferenceType = ("id",)
     ):
         """
         Performs UPDATE and verifies that object is updated
@@ -80,7 +89,7 @@ class UpdateTest(BulkyTest):
             Model,
             [dataset, dataset],
             returning=returning,
-            reference_field=references,
+            reference=references,
         )
 
         self.session.refresh(self.obj)

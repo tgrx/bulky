@@ -1,22 +1,28 @@
-import os
 import unittest
 from contextlib import closing
 
 import sqlalchemy as sa
+from dynaconf import settings
 from sqlalchemy import create_engine
 from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import Session
 
-DATABASE_URL = os.getenv("DATABASE_URL")
+try:
+    DATABASE_URL = settings.DATABASE_URL
+    assert DATABASE_URL, "database is not configured"
+except AttributeError as err:
+    raise AssertionError("database is not configured")
 
 Base = declarative_base()
 
 
-class Model(Base):
+class Model(Base):  # type: ignore
     __tablename__ = "t"
 
     id = sa.Column(sa.Integer, primary_key=True, autoincrement=True)
+
+    v_default = sa.Column(sa.Integer, default="31337")
 
     v_array = sa.Column(ARRAY(sa.Text))
     v_bool = sa.Column(sa.Boolean)
@@ -29,10 +35,7 @@ class Model(Base):
 
 
 def get_engine():
-    if not DATABASE_URL:
-        raise RuntimeError("DB is not configured")
-
-    engine = create_engine(DATABASE_URL, isolation_level="AUTOCOMMIT")
+    engine = create_engine(DATABASE_URL)
     return engine
 
 
@@ -95,6 +98,8 @@ class BulkyTest(unittest.TestCase):
             self._transaction.rollback()
         finally:
             self._connection.close()
+
+        self._engine = self._connection = self._transaction = None
 
         super().tearDown()
 

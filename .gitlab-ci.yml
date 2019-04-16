@@ -4,28 +4,54 @@ services:
   - postgres:latest
 
 variables:
-  PIP_CACHE_DIR: "$CI_PROJECT_DIR/.cache/pip"
   POSTGRES_DB: test
   POSTGRES_USER: test
   POSTGRES_PASSWORD: "test"
   DATABASE_URL: "postgresql://test:test@postgres:5432/test"
-
-cache:
-  paths:
-    - .cache/pip
-    - venv
+  ENV_FOR_DYNACONF: testing_gitlab_ci
 
 before_script:
-  - python -V               # Print out python version for debugging
-  - pip install virtualenv
-  - virtualenv venv
-  - source venv/bin/activate
-  - pip install --upgrade --requirement requirements.txt
+  - python -V
+  - pip install pipenv
+  - pipenv --python $(which python) install --dev
 
-test:
-  script:
-  - python setup.py test
+stages:
+  - test
+  - build
+  - deploy
 
-run:
+.test-generic:
   script:
-  - python setup.py sdist
+    - ./qa.sh
+
+test-latest:
+  extends: .test-generic
+  stage: test
+  image: python:latest
+
+test-3.7:
+  extends: .test-generic
+  stage: test
+  image: python:3.7
+
+test-3.6:
+  extends: .test-generic
+  stage: test
+  image: python:3.6
+
+build wheels:
+  stage: build
+  when: on_success
+  script:
+    - pipenv run python setup.py bdist_wheel
+  artifacts:
+    paths:
+      - dist/
+
+distribute:
+  stage: deploy
+  when: on_success
+  only:
+    - releases@tgrx/bulky
+  script:
+    - pipenv run twine upload -u "$PYPI_USERNAME" -p "$PYPI_PASSWORD" dist/*
