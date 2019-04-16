@@ -2,12 +2,12 @@ from setuptools import find_packages, setup
 
 setup(
     name="bulky",
-    version="0.0.1b1",
-    description="Utilites for bulk operations using SQLAlchemy and PostgreSQL",
+    version="1.0",
+    description="A library with bulk operations on SQLAlchemy and PostgreSQL",
     author="Alexander Sidorov",
     author_email="alex.n.sidorov@gmail.com",
     classifiers=[
-        "Development Status :: 4 - Beta",
+        "Development Status :: 5 - Production/Stable",
         "Environment :: Console",
         "Intended Audience :: Developers",
         "License :: OSI Approved :: Apache Software License",
